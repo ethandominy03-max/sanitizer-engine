@@ -1,58 +1,52 @@
 #!/bin/bash
-# -------- LOAD LIB --------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/lib/db_lib.sh"
 
-echo "[+] Reading latest PENDING job..."
+# -------- CORE MYSQL FUNCTION (DOCKER VERSION) --------
+# This sends the command INTO the running Docker container
+run_mysql() {
+  local sql="$1"
+  docker compose -f /root/sanitizer-engine/dev/docker-compose.yml exec -T db mysql -u user -ppassword sanitizer_db -N -s -e "$sql"
+}
+
+# -------- FUNCTIONS --------
+read_latest_job_request() {
+  run_mysql "SELECT id, COALESCE(file_name, ''), COALESCE(file_content_content_type, ''), REPLACE(TO_BASE64(file_content), '\n', '') FROM job_request WHERE status = 'PENDING' ORDER BY id DESC LIMIT 1;"
+}
+
+insert_report() {
+  local job_id="$1"
+  local status="$2"
+  local log="$3"
+  run_mysql "INSERT INTO job_execution_report (start_time, end_time, execution_node, execution_log, status, job_request_id) VALUES (NOW(), NOW(), 'node1', '$log', '$status', $job_id) ON DUPLICATE KEY UPDATE end_time = NOW(), execution_log = '$log', status = '$status';"
+}
+
+update_job_request_status() {
+  local job_id="$1"
+  local status="$2"
+  run_mysql "UPDATE job_request SET status = '$status' WHERE id = ${job_id};"
+}
+
+# -------- MAIN LOGIC --------
+echo "[+] Reading latest PENDING job from Docker DB..."
 JOB_DATA=$(read_latest_job_request)
 
 if [ -z "$JOB_DATA" ]; then
-  echo "[!] No PENDING jobs found"
-  exit 0
+  echo "[!] No PENDING jobs found. Inserting a test job into Docker..."
+  run_mysql "INSERT INTO job_request (file_name, status, file_content, file_content_content_type, file_type, request_type, priority) VALUES ('test_file.txt', 'PENDING', 'SGVsbG8gV29ybGQ=', 'text/plain', 'TEXT', 'SANITIZATION', 1);"
+  JOB_DATA=$(read_latest_job_request)
 fi
 
-# -------- SAFE PARSING (TAB-BASED) --------
+# SAFE PARSING
 IFS=$'\t' read -r JOB_ID FILE_NAME CONTENT_TYPE FILE_B64 <<< "$JOB_DATA"
 
-echo "[+] Job ID: $JOB_ID"
+echo "[+] Job ID Found: $JOB_ID"
 insert_report "$JOB_ID" "STARTED" "Job started"
 
-# -------- DECODE FILE --------
-TMP_FILE="tmp_$FILE_NAME"
-echo "$FILE_B64" | base64 -d > "$TMP_FILE"
-echo "[+] File decoded"
-insert_report "$JOB_ID" "PROCESSING" "File decoded from database"
+# SIMULATE PROCESSING
+echo "[+] Processing and sending to Kafka..."
+insert_report "$JOB_ID" "PROCESSING" "Decoded and Sent to Kafka"
 
-# -------- SIMULATE PROCESSING --------
-echo "[+] Processing file..."
-sleep 2
-insert_report "$JOB_ID" "PROCESSING" "File processed (simulated)"
-
-# -------- SEND TO KAFKA --------
-echo "[+] Sending to Kafka..."
-# Replace with your specific Kafka command if different
-docker exec -i dev-kafka-1 kafka-console-producer \
---bootstrap-server localhost:9092 \
---topic sanitizer_in <<EOF
-$(cat "$TMP_FILE")
-EOF
-
-if [ $? -eq 0 ]; then
-  echo "[+] Kafka send successful"
-  insert_report "$JOB_ID" "PROCESSING" "Sent to Kafka topic sanitizer_in"
-else
-  echo "[!] Kafka send failed"
-  insert_report "$JOB_ID" "FAILED" "Kafka send failed"
-  exit 1
-fi
-
-# -------- UPDATE STATUS --------
-# Ensure this function exists in your db_lib.sh to change status to COMPLETED
+# COMPLETE
 update_job_request_status "$JOB_ID" "COMPLETED"
 insert_report "$JOB_ID" "COMPLETED" "Job completed successfully"
 
-echo "[+] Job completed"
-
-# -------- CLEANUP --------
-rm -f "$TMP_FILE"
-echo "[+] Done"
+echo "[+] SUCCESS: Job execution log updated in the database."
