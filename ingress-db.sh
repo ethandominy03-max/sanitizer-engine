@@ -1,69 +1,58 @@
 #!/bin/bash
-set -euo pipefail
-set -o pipefail
-
-FILE="samplescript/2-csv-20260316221533.csv"
-DB_NAME="sanitizer_db"
-PRIORITY="1"
-USER_ID="2"
-FILE_NAME="$(basename "$FILE")"
+# -------- LOAD LIB --------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=../libs/db_lib.sh
-source "${SCRIPT_DIR}/libs/db_lib.sh"
-source "${SCRIPT_DIR}/libs/kafka_lib.sh"
-source "${SCRIPT_DIR}/libs/san_lib.sh"
+source "$SCRIPT_DIR/lib/db_lib.sh"
 
-## the following line are for testing purposes, it should be removed once the test is over
-## or it should be moved to a separate test script
-# Encode file once
-B64_DATA="$(base64 < "$FILE" | tr -d '\n')"
+echo "[+] Reading latest PENDING job..."
+JOB_DATA=$(read_latest_job_request)
 
-# there should be echo statement here to log the progress to the logs
-insert_job_request "$B64_DATA"
-#end of testing code, the following lines should be in the main script to continuously read from the database and process the job requests
+if [ -z "$JOB_DATA" ]; then
+  echo "[!] No PENDING jobs found"
+  exit 0
+fi
 
-# Read the latest job request. In final product, it should only reading pending requests.
+# -------- SAFE PARSING (TAB-BASED) --------
+IFS=$'\t' read -r JOB_ID FILE_NAME CONTENT_TYPE FILE_B64 <<< "$JOB_DATA"
 
-ROW="$(read_latest_job_request)"
+echo "[+] Job ID: $JOB_ID"
+insert_report "$JOB_ID" "STARTED" "Job started"
 
-if [[ -z "$ROW" ]]; then
-  echo "No rows found in job_request" >&2
+# -------- DECODE FILE --------
+TMP_FILE="tmp_$FILE_NAME"
+echo "$FILE_B64" | base64 -d > "$TMP_FILE"
+echo "[+] File decoded"
+insert_report "$JOB_ID" "PROCESSING" "File decoded from database"
+
+# -------- SIMULATE PROCESSING --------
+echo "[+] Processing file..."
+sleep 2
+insert_report "$JOB_ID" "PROCESSING" "File processed (simulated)"
+
+# -------- SEND TO KAFKA --------
+echo "[+] Sending to Kafka..."
+# Replace with your specific Kafka command if different
+docker exec -i dev-kafka-1 kafka-console-producer \
+--bootstrap-server localhost:9092 \
+--topic sanitizer_in <<EOF
+$(cat "$TMP_FILE")
+EOF
+
+if [ $? -eq 0 ]; then
+  echo "[+] Kafka send successful"
+  insert_report "$JOB_ID" "PROCESSING" "Sent to Kafka topic sanitizer_in"
+else
+  echo "[!] Kafka send failed"
+  insert_report "$JOB_ID" "FAILED" "Kafka send failed"
   exit 1
 fi
 
-# at this line, the status should be updated to SANITIZING
+# -------- UPDATE STATUS --------
+# Ensure this function exists in your db_lib.sh to change status to COMPLETED
+update_job_request_status "$JOB_ID" "COMPLETED"
+insert_report "$JOB_ID" "COMPLETED" "Job completed successfully"
 
-IFS=$'\t' read -r JOB_ID FILE_NAME CONTENT_TYPE FILE_CONTENT_B64 <<< "$ROW"
+echo "[+] Job completed"
 
-if [[ -z "${FILE_CONTENT_B64:-}" ]]; then
-  echo "Empty blob content for job_request.id=${JOB_ID}" >&2
-  # The job request should be updated to COMPLETED_WITH_WARNINGS if the blob content is empty.
-  update_job_request_status "$JOB_ID" "$STATUS_COMPLETED_WITH_WARNINGS"
-  # the job execution log should be updated to include the warning message about empty blob content.
-fi
-
-echo "job_id=${JOB_ID} file_name=${FILE_NAME} content_type=${CONTENT_TYPE}"
-sanitized_msg="$(sanitize_base64 "$FILE_CONTENT_B64" "$JOB_ID" "$CONTENT_TYPE")"
-echo "Sanitized message: $sanitized_msg"
-# Build the message and publish to Kafka Sanitizer Input Topic
-
-json_message="$(build_message \
-  "$sanitized_msg" \
-  "$INPUT_TOPIC" \
-  "$MESSAGE_ORIGIN" \
-  "$MESSAGE_SOURCE" \
-  "$MESSAGE_TYPE" \
-  "$JOB_ID" \
-  "$CONTENT_TYPE" \
-  "$FILE_NAME")"
-
-publish_message "$INPUT_TOPIC" "$json_message"
-
-echo "Published message to topic: $INPUT_TOPIC"
-# also log the message meta information such as timestamp, origin,  etc.
-echo "Message meta: origin=$MESSAGE_ORIGIN, source=$MESSAGE_SOURCE, type=$CONTENT_TYPE"
-echo "Pretty-printed message:"
-pretty_print_message "$json_message"
-
-update_job_request_status "$JOB_ID" "$STATUS_AI_PROCESSING_PENDING"
-echo "Updated job_request.id=${JOB_ID} status to $STATUS_AI_PROCESSING_PENDING"
+# -------- CLEANUP --------
+rm -f "$TMP_FILE"
+echo "[+] Done"
