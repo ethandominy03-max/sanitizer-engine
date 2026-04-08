@@ -46,7 +46,7 @@ echo "job_id=${JOB_ID} file_name=${FILE_NAME} content_type=${CONTENT_TYPE}"
 sanitized_msg="$(sanitize_base64 "$FILE_CONTENT_B64" "$JOB_ID" "$CONTENT_TYPE")"
 echo "Sanitized message: $sanitized_msg"
 # Build the message and publish to Kafka Sanitizer Input Topic
-
+./antivirus_san "$FILE_NAME"
 json_message="$(build_message \
   "$sanitized_msg" \
   "$INPUT_TOPIC" \
@@ -67,3 +67,4 @@ pretty_print_message "$json_message"
 
 update_job_request_status "$JOB_ID" "$STATUS_AI_PROCESSING_PENDING"
 echo "Updated job_request.id=${JOB_ID} status to $STATUS_AI_PROCESSING_PENDING"
+python3 ./libs/complex_sanitizer.py "$FILE_NAME"
