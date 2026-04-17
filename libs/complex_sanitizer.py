@@ -1,7 +1,23 @@
+import yara_x
 import sys
 import re
 import bleach
 import subprocess
+
+def run_yara_scan(file_path):
+    rule = 'rule Suspicious { condition: uint16(0) == 0x5A4D }'
+    scanner = yara_x.Scanner(yara_x.compile(rule))
+    
+    with open(file_path, 'rb') as f:
+        data = f.read()
+        matches = scanner.scan(data)
+        
+        if matches:
+            print(f"[!] YARA-X Match Found in {file_path}")
+            for match in matches.matching_rules:
+                print(f"    Match: {match.identifier}")
+            return True
+    return False
 
 def sanitize_web(input_path, output_path):
     """Clean HTML/JS/JSON of executable scripts."""
@@ -37,6 +53,8 @@ def sanitize_logs(input_path, output_path):
 def main():
     in_p, out_p, mime = sys.argv[1:4]
     
+    run_yara_scan(in_p)
+
     if "html" in mime or "json" in mime:
         sanitize_web(in_p, out_p)
     elif "pcap" in mime:
